@@ -1,0 +1,63 @@
+CC         := gcc
+INC_DIR    := include
+SRC_DIR    := src
+TOOLS_DIR  := tools
+BUILD_DIR  := build
+
+CFLAGS     := -std=c11 -Wall -Wextra -O2 -I$(INC_DIR) -I$(TOOLS_DIR)
+
+ifeq ($(OS),Windows_NT)
+    TARGET_EXT := .exe
+    SO_EXT     := .dll
+    LDFLAGS    :=
+    PYTHON     := python
+    MKDIR      := if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+    RM         := cmd /C if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
+else
+    TARGET_EXT :=
+    SO_EXT     := .so
+    LDFLAGS    := -ldl
+    PYTHON     := python3
+    MKDIR      := mkdir -p $(BUILD_DIR)
+    RM         := rm -rf $(BUILD_DIR)
+endif
+
+HOST   := $(BUILD_DIR)/bumpless_host$(TARGET_EXT)
+PROBE  := $(BUILD_DIR)/probe_motor$(TARGET_EXT)
+PLAN   := $(BUILD_DIR)/plan_v1_to_v3.bp_plan
+
+MODULE_NAMES := fn_main fn_motor_v1 fn_motor_v2_logic fn_motor_v3_layout fn_motor_v4_crash
+LIBS         := $(patsubst %,$(BUILD_DIR)/lib%$(SO_EXT),$(MODULE_NAMES))
+
+all: $(BUILD_DIR) $(HOST) $(LIBS) $(PLAN)
+
+$(BUILD_DIR):
+	$(MKDIR)
+
+$(HOST): $(SRC_DIR)/host/host_main.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+$(BUILD_DIR)/libfn_%$(SO_EXT): $(SRC_DIR)/modules/fn_%.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
+
+$(PROBE): $(TOOLS_DIR)/probe_motor.c $(TOOLS_DIR)/bp_probe.h $(INC_DIR)/bumpless.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $<
+
+$(BUILD_DIR)/layout_v1.json $(BUILD_DIR)/layout_v3.json: $(PROBE)
+	./$(PROBE) $(BUILD_DIR)
+
+$(PLAN): $(BUILD_DIR)/layout_v1.json $(BUILD_DIR)/layout_v3.json $(TOOLS_DIR)/bp_plan_compiler.py
+	$(PYTHON) $(TOOLS_DIR)/bp_plan_compiler.py \
+		--src $(BUILD_DIR)/layout_v1.json \
+		--dst $(BUILD_DIR)/layout_v3.json \
+		--fn-id 1 \
+		--out-bin $(BUILD_DIR)/plan_v1_to_v3.bp_plan \
+		--out-c $(BUILD_DIR)/copy_plan_v1_to_v3.h
+
+run: all
+	./$(HOST)
+
+clean:
+	$(RM)
+
+.PHONY: all run clean
