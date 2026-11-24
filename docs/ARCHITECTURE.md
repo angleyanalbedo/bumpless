@@ -143,8 +143,47 @@ flowchart TD
     D --> G["CopyPlan 离线编译器 (bp_plan_compiler.py)"]
 ```
 
-* **方案 A（同构编译器探针）**：使用与固件完全一致的交叉工具链编译轻量级探针，通过 `offsetof` 与 `sizeof` 直接获取目标硬件运行时的真实字节偏移。
-* **方案 B（离线 DWARF 解析器）**：针对生产环境，直接从编译器生成的调试段（DWARF 3/4/5）提取 DIE 属性（`DW_AT_data_member_location`），**不改变哪怕一行源码**即可完成物理布局重建。
+* **方案 A（同构编译器探针 + QEMU 用户态仿真）**：使用与固件完全一致的交叉工具链编译轻量级探针，通过 `offsetof` 与 `sizeof` 直接获取目标硬件运行时的真实字节偏移。在 x86 构建宿主机上，配合 QEMU 用户态仿真器直接运行目标探针，无需物理硬件即可输出 100% 字节一致的布局。
+* **方案 B（离线 DWARF 解析器）**：针对生产环境，直接从交叉编译生成的目标 ELF 调试段（DWARF 3/4/5）提取 DIE 属性（`DW_AT_data_member_location`），**不改变哪怕一行源码**即可完成物理布局重建。
+
+#### 核心价值：为什么在交叉编译中引入 QEMU / DWARF？—— 达成 100% 一致性的 `memcpy`
+
+在嵌入式与工控实际研发中，**构建环境与运行环境往往是异构的**：
+* **开发/构建机（Host）**：x86_64（64 位指针、8 字节自然对齐、System V / MSVC ABI）；
+* **目标工控机（Target）**：ARM Cortex-A/M、RISC-V 32/64 或 MIPS（32 位指针、ARM AAPCS 严格对齐、不同的填充 Padding 字节）。
+
+##### 1. 异构计算的致命陷阱：偏移错位
+如果直接在 x86 宿主机上运行探针计算偏移：
+* x86 宿主机上：`sizeof(void*) = 8`，指针占 8 字节；
+* ARM32 目标机上：`sizeof(void*) = 4`，指针占 4 字节，后续字段的偏移被硬生生错开了 4 个字节！
+* **致命灾难**：如果宿主机拿错位的 Plan 生成了 CopyPlan 并发送给目标机，目标机在实时周期间隙执行 `memcpy` 时，**会把转速（speed）写进扭矩（torque），把浮点数写进布尔标志**，甚至触发硬件总线未对齐异常（Alignment Fault）导致硬件硬死锁！
+
+##### 2. QEMU 的角色：虚拟硬件探针沙盒（Virtual Hardware Harness）
+为了在不需要外接物理 PLC 硬件或 JTAG 仿真器的情况下，在 CI/CD 流水线上也能生成绝对可靠的 CopyPlan，QEMU 用户态仿真（`qemu-arm` / `qemu-aarch64` / `qemu-riscv`）提供了完美的解决方案：
+
+```text
+[x86_64 构建主机]
+      │
+      ├──> 交叉编译器 (arm-linux-gnueabihf-gcc) ──> 编译生成 target-probe (ARM ELF)
+      │
+      ├──> QEMU 用户态仿真器 (qemu-arm ./target-probe)
+      │          │
+      │          ▼
+      │    在 x86 主机上模拟真实的 ARM AAPCS 内存模型与 CPU 字长，
+      │    通过 offsetof / sizeof 打印出的偏移量与真实 ARM 芯片 100% 绝对一致！
+      │
+      └──> bp_plan_compiler.py 消费上述 JSON，生成跨平台二进制 CopyPlan (.bp_plan)
+                 │
+                 ▼ 下发至现场
+[真实 ARM32 工业设备]
+      │
+      └──> 实时周期间隙直接执行合并纯 memcpy ──> 物理偏移 100% 吻合，零错位，绝对安全！
+```
+
+##### 3. QEMU 与 DWARF 的双保险协同
+* **QEMU 用户态探针**：动态真实执行，百分之百反映运行期编译器与运行时库协商的 ABI，对复杂宏计算、内联汇编对齐极其准确；
+* **DWARF 静态探针 (`bp_dwarf_probe.py`)**：直接静态读取目标 ELF 的元数据，无需安装或启动 QEMU，轻量迅捷；
+* **两者的终极目标一致**：**消除跨架构跨平台编译时的内存布局歧义，确保在最终目标机上周期间隙跑的纯 `memcpy` 绝对精准、绝对一致、完全可预测！**
 
 ---
 
