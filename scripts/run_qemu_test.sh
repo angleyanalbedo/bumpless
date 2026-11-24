@@ -51,15 +51,24 @@ if command -v "${CROSS_CC}" >/dev/null 2>&1 && command -v "${QEMU}" >/dev/null 2
 
     echo "[SUCCESS] ARM32 CopyPlan generated and verified with 100% ABI fidelity!"
 else
-    echo "[NOTE] ARM32 cross-compiler (${CROSS_CC}) or QEMU (${QEMU}) not detected."
-    echo "       To run native ARM32 cross-emulation, install via:"
-    echo "         sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user"
     echo ""
-    echo "       Or run via Docker container in one line:"
-    echo "         docker run --rm -v \$(pwd):/work -w /work multiarch/qemu-user-static:register --reset"
-    echo "         docker run --rm -v \$(pwd):/work -w /work debian:bullseye bash scripts/run_qemu_test.sh"
+    echo "===================================================================="
+    echo "[WARNING] REAL ARM32 CROSS-COMPILER OR QEMU NOT DETECTED!"
+    echo "===================================================================="
+    echo "  * Notice: '${CROSS_CC}' or '${QEMU}' was NOT found in PATH."
+    echo "  * Real ARM ELF cross-compilation and QEMU hardware emulation were SKIPPED."
+    echo "  * CURRENT MODE: FALLBACK SYNTHETIC AAPCS SIMULATION ONLY."
+    echo "    - Uses synthetic AAPCS 32-bit layout rules (4-byte pointers, 8-byte alignment)."
+    echo "    - Only verifies that 'bp_plan_compiler.py' generates valid plans for 32-bit ABI."
+    echo "    - THIS IS NOT A NATIVE ARM COMPILATION OR HARDWARE EXECUTION RUN!"
     echo ""
-    echo "[STEP 4] Executing synthetic ARM32 ABI layout verification via Python..."
+    echo "  * To execute the REAL native ARM32 cross-compilation & QEMU emulation:"
+    echo "    - Linux / WSL : sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user"
+    echo "    - Windows     : scoop install gcc-arm-none-eabi"
+    echo "    - Docker      : docker run --rm -v \$(pwd):/work -w /work debian:bullseye bash scripts/run_qemu_test.sh"
+    echo "===================================================================="
+    echo ""
+    echo "[FALLBACK STEP] Running synthetic AAPCS ARM32 ABI layout test via Python..."
     python3 -c "
 import json
 
@@ -107,5 +116,7 @@ print('  [MOCK] Exported synthetic AAPCS ARM32 layouts to ${BUILD_DIR}/layout_v1
         --out-bin "${BUILD_DIR}/plan_arm32.bp_plan" \
         --out-c "${BUILD_DIR}/copy_plan_arm32.h"
 
-    echo "[PASS] Target-ABI isomorphism demonstrated: 32-bit pointer offsets & alignment correctly handled!"
+    echo ""
+    echo "[SIMULATION PASS] Plan compiler correctly handled synthetic AAPCS 32-bit layout!"
+    echo "                  (Reminder: Real native ARM compilation was SKIPPED due to missing toolchain.)"
 fi

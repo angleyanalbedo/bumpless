@@ -61,12 +61,21 @@ def main():
         print("[SUCCESS] ARM32 CopyPlan generated and verified with 100% ABI fidelity!")
 
     else:
-        print("[NOTE] ARM32 cross-compiler (arm-linux-gnueabihf-gcc) or QEMU (qemu-arm) not found in PATH.")
-        print("       In Linux/CI environments, install via:")
-        print("         sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user")
-        print("       Or run in Docker:")
-        print("         docker run --rm -v $(pwd):/work -w /work debian:bullseye bash scripts/run_qemu_test.sh\n")
-        print("[STEP 4] Executing synthetic AAPCS ARM32 ABI layout verification via Python...")
+        print("\n" + "=" * 68)
+        print("[WARNING] REAL ARM32 CROSS-COMPILER OR QEMU NOT DETECTED!")
+        print("=" * 68)
+        print("  * Notice: 'arm-linux-gnueabihf-gcc' or 'qemu-arm' was NOT found in PATH.")
+        print("  * Real ARM ELF cross-compilation and QEMU hardware emulation were SKIPPED.")
+        print("  * CURRENT MODE: FALLBACK SYNTHETIC AAPCS SIMULATION ONLY.")
+        print("    - Uses synthetic AAPCS 32-bit layout rules (4-byte pointers, 8-byte alignment).")
+        print("    - Only verifies that 'bp_plan_compiler.py' generates valid plans for 32-bit ABI.")
+        print("    - THIS IS NOT A NATIVE ARM COMPILATION OR HARDWARE EXECUTION RUN!")
+        print("\n  * To execute the REAL native ARM32 cross-compilation & QEMU emulation:")
+        print("    - Linux / WSL : sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user")
+        print("    - Windows     : scoop install gcc-arm-none-eabi")
+        print("    - Docker      : docker run --rm -v $(pwd):/work -w /work debian:bullseye bash scripts/run_qemu_test.sh")
+        print("=" * 68 + "\n")
+        print("[FALLBACK STEP] Running synthetic AAPCS ARM32 ABI layout test via Python...")
 
         # Synthetic ARM32 layout (AAPCS: 32-bit pointers, 4-byte/8-byte alignments)
         arm32_layout_v1 = {
@@ -105,7 +114,7 @@ def main():
         with open(v3_path, "w") as f:
             json.dump(arm32_layout_v3, f, indent=2)
 
-        print(f"  [MOCK] Exported synthetic AAPCS ARM32 layouts to {v1_path} and {v3_path}")
+        print(f"  [SYNTHETIC] Exported mock AAPCS ARM32 layouts to {v1_path} and {v3_path}")
 
         cmd_plan = [
             sys.executable, os.path.join(root_dir, "tools", "bp_plan_compiler.py"),
@@ -117,7 +126,8 @@ def main():
         ]
         subprocess.check_call(cmd_plan)
 
-        print("\n[PASS] Target-ABI isomorphism demonstrated: 32-bit pointer offsets & alignment correctly handled!")
+        print("\n[SIMULATION PASS] Plan compiler correctly handled synthetic AAPCS 32-bit layout!")
+        print("                  (Reminder: Real native ARM compilation was SKIPPED due to missing toolchain.)")
 
 if __name__ == "__main__":
     main()
