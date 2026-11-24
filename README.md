@@ -30,7 +30,9 @@
 bumpless/
 ├── include/                   # 公共 API 与核心头文件
 │   ├── bumpless.h             # 跨平台核心热更引擎（单头文件库设计）
-│   └── common_ids.h           # 统一函数槽与实例槽 ID 常量定义
+│   ├── common_ids.h           # 统一函数槽与实例槽 ID 常量定义
+│   ├── bp_module.h            # 开发者零样板宏助手 (BP_EXPORT_MODULE)
+│   └── bp_stubs.h             # 方案1自动生成的原生 C 语法包装桩
 ├── src/                       # 源代码实现
 │   ├── host/
 │   │   └── host_main.c        # 运行时宿主（调度 RT 周期、加载模块与 Plan）
@@ -44,7 +46,8 @@ bumpless/
 │   ├── bp_probe.h             # 目标 ABI 同构宏与元数据结构体
 │   ├── probe_motor.c          # 目标同构探针源码（用目标编译器编译）
 │   ├── bp_dwarf_probe.py      # 离线 DWARF 零侵入布局提取器
-│   └── bp_plan_compiler.py    # 离线 CopyPlan 编译器（区间合并与安全过滤）
+│   ├── bp_plan_compiler.py    # 离线 CopyPlan 编译器（区间合并与安全过滤）
+│   └── bp_stub_gen.py         # 方案1透明包装桩生成器与模块脚手架工具
 ├── docs/                      # 架构设计、核心原理与技术权衡文档
 │   └── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
 ├── build/                     # 构建产物输出目录（可由 make clean 清理）

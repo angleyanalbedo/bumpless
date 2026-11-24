@@ -227,19 +227,52 @@ $$T_{\text{gap}} = T_{\text{atomic\_swap}} + \sum_{m=1}^{M} \left( \sum_{k=1}^{K
 | **方案 C：GOT / IAT 符号重定向** | **零侵入（原生动态库调用）**| 零额外开销 | 依赖 ELF/PE 格式 | 需配合槽位重定位 | 模块化 Linux/Windows 宿主 |
 | **方案 D：指令跳板 (JMP Trampoline)** | **零侵入（直接机器码调用）**| 存在跳板开销 | 强依赖 CPU 指令集与 I-Cache | 极难处理布局变更 | Linux 内核 livepatch、只改逻辑的补丁 |
 
-#### 1. 方案 B 实现：透明内联包装桩（推荐工程实践）
-无需在业务代码中散落 `BP_CALL`，通过生成的头文件直接导出原生 C 函数签名：
-```c
-/* generated_motor_api.h */
-static inline void motor_exec(FbMotor* self, uint64_t now_ns) {
-    g_bp_ctx.fn_table[FN_FB_MOTOR](&g_bp_ctx, self, now_ns);
-}
+#### 1. 方案 B 实现：透明内联包装桩（已落地实现工具链）
 
-/* 宿主业务代码：完全原生 C，零心智负担 */
-void control_loop(void) {
-    motor_exec(p_motor1, now_ns);
-}
-```
+通过工具链自动生成轻量级头文件，宿主和调用方完全通过原生 C 函数语法直调：
+* **生成工具**：`tools/bp_stub_gen.py generate --header include/common_ids.h --out include/bp_stubs.h`
+* **生成的头文件 (`include/bp_stubs.h`)**：
+  ```c
+  /* 自动生成的原生 C 直调内联桩 */
+  static inline void fb_motor_call(BpRuntimeCtx* ctx, uint32_t inst_id, uint64_t now_ns) {
+      BP_CALL(ctx, FN_FB_MOTOR, inst_id, now_ns);
+  }
+  static inline void fb_motor_call_direct(BpRuntimeCtx* ctx, void* self, uint64_t now_ns) {
+      ctx->fn_table[FN_FB_MOTOR](ctx, self, now_ns);
+  }
+  ```
+* **调用方业务代码（如 `src/modules/fn_main.c`）**：
+  ```c
+  #include "bp_stubs.h"
+
+  static void main_exec(BpRuntimeCtx* ctx, void* self, uint64_t now_ns) {
+      MainState* s = (MainState*)self;
+      s->cycle_count++;
+      
+      /* 方案 1: 原生 C 函数直调语法，彻底告别手写 BP_CALL 样板代码 */
+      fb_motor_call(ctx, s->motor1_inst_id, now_ns);
+  }
+  ```
+* **模块声明宏 (`include/bp_module.h`)**：
+  新模块或迁移存量函数无需手写 30 行 `BpModuleABI` 结构体：
+  ```c
+  #include "bp_module.h"
+
+  /* 一行宏搞定 ABI 绑定、哈希声明与导出函数 */
+  BP_EXPORT_MODULE(
+      FN_FB_MOTOR,
+      "fn_motor_v1",
+      0xA0000001ULL,
+      FbMotor_v1,
+      motor_init,
+      motor_exec
+  );
+  ```
+* **一键脚手架 (`tools/bp_stub_gen.py scaffold`)**：
+  ```bash
+  python tools/bp_stub_gen.py scaffold --name fn_pid --fn-id FN_FB_PID --struct FbPid --out src/modules/fn_pid.c
+  ```
+  自动生成符合规范的裸 POD 状态块与生命周期模板，极大降低工程师迁移存量函数的门槛。
 
 #### 2. 方案 C 实现：动态链接器重定向（GOT 劫持）
 在 Linux ELF 或 Windows PE 动态库架构中，模块间的函数调用本就通过全局偏移表（GOT, Global Offset Table）或导入地址表（IAT, Import Address Table）完成间接寻址：

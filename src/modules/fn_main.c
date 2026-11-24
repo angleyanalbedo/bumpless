@@ -1,8 +1,13 @@
 /*
  * fn_main.c - MAIN program (NEVER recompiled during FB_Motor hot-swaps!)
+ *
+ * Demonstrates Scheme 1 (Native C Transparent Call Wrappers):
+ * Uses `fb_motor_call(ctx, s->motor1_inst_id, now_ns)` instead of manual BP_CALL!
  */
 #include "bumpless.h"
 #include "common_ids.h"
+#include "bp_stubs.h"
+#include "bp_module.h"
 #include <stdio.h>
 
 typedef struct {
@@ -20,25 +25,22 @@ static void main_exec(BpRuntimeCtx* ctx, void* self, uint64_t now_ns) {
     MainState* s = (MainState*)self;
     s->cycle_count++;
     printf("[MAIN cycle=%d] ", s->cycle_count);
-    /* Indirect call through fn_table & inst_table */
-    BP_CALL(ctx, FN_FB_MOTOR, s->motor1_inst_id, now_ns);
+
+    /*
+     * Scheme 1 (透明内联桩 / Inline Wrapper Stub):
+     * Native C function call syntax! Zero manual BP_CALL or fn_table plumbing!
+     */
+    fb_motor_call(ctx, s->motor1_inst_id, now_ns);
 }
 
 /*
- * Zero-bloat raw POD: No runtime get_fields string metadata.
+ * Zero-boilerplate module export macro
  */
-static const BpModuleABI g_main_abi = {
-    .abi_version      = BUMPLESS_ABI_VERSION,
-    .build_tag        = "fn_main_v1",
-    .fn_id            = FN_MAIN,
-    .layout_hash      = 0x10000001ULL,
-    .inst_size        = sizeof(MainState),
-    .init_inst        = main_init,
-    .exec             = main_exec,
-    .get_fields       = NULL, /* Raw POD: Zero metadata bloat */
-    .precompiled_plan = NULL
-};
-
-BP_EXPORT const BpModuleABI* bp_get_module_abi(void) {
-    return &g_main_abi;
-}
+BP_EXPORT_MODULE(
+    FN_MAIN,
+    "fn_main_v1",
+    0x10000001ULL,
+    MainState,
+    main_init,
+    main_exec
+);

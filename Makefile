@@ -25,19 +25,23 @@ endif
 HOST   := $(BUILD_DIR)/bumpless_host$(TARGET_EXT)
 PROBE  := $(BUILD_DIR)/probe_motor$(TARGET_EXT)
 PLAN   := $(BUILD_DIR)/plan_v1_to_v3.bp_plan
+STUBS  := $(INC_DIR)/bp_stubs.h
 
 MODULE_NAMES := fn_main fn_motor_v1 fn_motor_v2_logic fn_motor_v3_layout fn_motor_v4_crash
 LIBS         := $(patsubst %,$(BUILD_DIR)/lib%$(SO_EXT),$(MODULE_NAMES))
 
-all: $(BUILD_DIR) $(HOST) $(LIBS) $(PLAN)
+all: $(BUILD_DIR) $(STUBS) $(HOST) $(LIBS) $(PLAN)
 
 $(BUILD_DIR):
 	$(MKDIR)
 
-$(HOST): $(SRC_DIR)/host/host_main.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h | $(BUILD_DIR)
+$(STUBS): $(INC_DIR)/common_ids.h $(TOOLS_DIR)/bp_stub_gen.py
+	$(PYTHON) $(TOOLS_DIR)/bp_stub_gen.py generate --header $(INC_DIR)/common_ids.h --out $@
+
+$(HOST): $(SRC_DIR)/host/host_main.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h $(STUBS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-$(BUILD_DIR)/libfn_%$(SO_EXT): $(SRC_DIR)/modules/fn_%.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h | $(BUILD_DIR)
+$(BUILD_DIR)/libfn_%$(SO_EXT): $(SRC_DIR)/modules/fn_%.c $(INC_DIR)/bumpless.h $(INC_DIR)/common_ids.h $(STUBS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
 
 $(PROBE): $(TOOLS_DIR)/probe_motor.c $(TOOLS_DIR)/bp_probe.h $(INC_DIR)/bumpless.h | $(BUILD_DIR)
