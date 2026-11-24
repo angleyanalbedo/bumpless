@@ -49,7 +49,8 @@ bumpless/
 │   ├── bp_plan_compiler.py    # 离线 CopyPlan 编译器（区间合并与安全过滤）
 │   └── bp_stub_gen.py         # 方案1透明包装桩生成器与模块脚手架工具
 ├── docs/                      # 架构设计、核心原理与技术权衡文档
-│   └── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
+│   ├── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
+│   └── WHY_NOT_STACK_ALLOCATION.md # 深度技术规范：为什么热更状态绝不能选栈分配？
 ├── build/                     # 构建产物输出目录（可由 make clean 清理）
 └── Makefile                   # 统一自动化构建系统
 ```
