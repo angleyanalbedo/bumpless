@@ -36,12 +36,17 @@ bumpless/
 ├── src/                       # 源代码实现
 │   ├── host/
 │   │   └── host_main.c        # 运行时宿主（调度 RT 周期、加载模块与 Plan）
+│   ├── benchmark/
+│   │   └── bench_main.c       # 5 项定量实验基准测试套件与控制论过渡验证
 │   └── modules/               # 可热更功能块（POU / FB）模块源码
 │       ├── fn_main.c          # 顶层 MAIN 主控程序
 │       ├── fn_motor_v1.c      # 电机控制 FB V1（基础版本）
 │       ├── fn_motor_v2_logic.c# 电机控制 FB V2（纯逻辑修改，0 拷贝快速路径）
 │       ├── fn_motor_v3_layout.c# 电机控制 FB V3（布局变更，新增温度与重排字段）
 │       └── fn_motor_v4_crash.c# 电机控制 FB V4（故障注入，验证崩溃守护与回滚）
+├── scripts/                   # 跨平台测试与仿真脚本
+│   ├── run_qemu_test.sh       # Linux / CI QEMU ARM32 交叉测试流水线
+│   └── run_qemu_test.py       # 跨平台 Python QEMU ARM32 验证工具
 ├── tools/                     # 离线探测、反射与 CopyPlan 预编译工具链
 │   ├── bp_probe.h             # 目标 ABI 同构宏与元数据结构体
 │   ├── probe_motor.c          # 目标同构探针源码（用目标编译器编译）
@@ -69,7 +74,13 @@ bumpless/
 # 1. 一键编译所有模块、提取离线 ABI 布局、生成 CopyPlan 并启动宿主验证
 make run
 
-# 2. 清理所有编译生成目录与二进制文件
+# 2. 运行工业级 5 项定量基准测试套件（时延抖动、消融加速比、水平扩展、零膨胀、故障回滚）
+make bench
+
+# 3. 运行跨平台 QEMU ARM32 目标 ABI 仿真测试流水线
+make qemu-test
+
+# 4. 清理所有编译生成目录与二进制文件
 make clean
 ```
 

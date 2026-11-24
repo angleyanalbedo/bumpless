@@ -157,6 +157,22 @@ typedef struct {
     BpPouFn           exec;
     const BpFieldLeaf* (*get_fields)(size_t* out_count); /* Optional fallback */
     const BpCopyPlan* precompiled_plan;                  /* Optional precompiled plan */
+
+    /*
+     * Reserved Advanced Extension Hooks:
+     * 1. Control-Theoretic Bumpless Handover Hook (无冲击平滑过渡):
+     *    Invoked immediately after state migration (or logic swap) to perform
+     *    integral tracking, rate limiting, or derivative state smoothing so
+     *    physical actuator outputs remain C0 continuous without mechanical shock.
+     */
+    void (*handover_hook)(void* new_self, const void* old_self);
+
+    /*
+     * 2. Deep Graph / Dynamic Heap Migration Hook (深层指针图与堆内存深拷贝):
+     *    Invoked during state migration for instances containing dynamically allocated
+     *    buffers or graph nodes (e.g. dynamic curve arrays float* points).
+     */
+    void (*custom_migrate_hook)(void* new_self, const void* old_self);
 } BpModuleABI;
 
 typedef const BpModuleABI* (*BpGetModuleAbiFn)(void);
@@ -227,6 +243,16 @@ static inline uint64_t bp_monotonic_ns(void) {
 #endif
 }
 
+/* Telemetry metrics for real-time jitter and latency monitoring */
+typedef struct {
+    uint64_t last_gap_ns;       /* Total cycle gap duration (commit + copy + hook) */
+    uint64_t last_copy_ns;      /* Time spent inside coalesced memcpy */
+    uint64_t last_exec_ns;      /* Time spent executing MAIN cycle */
+    uint64_t last_rollback_ns;  /* Time spent executing rollback if fault occurred */
+    uint64_t total_swaps;       /* Total successful swaps committed */
+    uint64_t total_rollbacks;   /* Total fault rollbacks executed */
+} BpPerfMetrics;
+
 typedef struct {
     bp_dl_t            dl_handle;
     const BpModuleABI* abi;
@@ -283,6 +309,9 @@ typedef struct {
     _Atomic(BpSwapPlan*) pending_plan;
     _Atomic(void*)       retired_handle;
     _Atomic(int)         last_status;
+
+    /* Runtime telemetry & performance metrics */
+    BpPerfMetrics      metrics;
 } BpHost;
 
 /* Thread-local jump buffer for RT crash guard */
@@ -687,14 +716,28 @@ static inline BpStatus bp_host_stage_func(BpHost* host, const char* so_path) {
  */
 static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
                              uint32_t main_inst_id, uint64_t now_ns) {
+    uint64_t gap_start_ns = bp_monotonic_ns();
+
     /* 1. Quiescent point: commit any staged function swap */
     BpSwapPlan* plan = atomic_exchange_explicit(&host->pending_plan, NULL,
                                                 memory_order_acq_rel);
     if (plan) {
+        /* If previous hot-swap was pending verification, it survived until this cycle. Commit it now! */
+        if (host->verify_pending && host->active_verify_plan) {
+            host->verify_pending = false;
+            void* prev_retired = atomic_exchange_explicit(&host->retired_handle,
+                                                          host->prev_func_slot.dl_handle,
+                                                          memory_order_acq_rel);
+            if (prev_retired) bp_dlclose(prev_retired);
+            bp_free_plan(host->active_verify_plan, false, true);
+            host->active_verify_plan = NULL;
+        }
+
         uint32_t fid = plan->fn_id;
         host->prev_func_slot = host->funcs[fid];
 
         if (!plan->zero_copy) {
+            uint64_t copy_start_ns = bp_monotonic_ns();
             for (size_t m = 0; m < plan->migration_count; m++) {
                 uint8_t* dst = (uint8_t*)plan->migrations[m].new_mem;
                 const uint8_t* src = (const uint8_t*)plan->migrations[m].old_mem;
@@ -706,11 +749,32 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
                            plan->copy_ops[k].len);
                 }
 
+                /* Deep Graph / Custom Heap Migration Hook */
+                if (plan->new_abi->custom_migrate_hook) {
+                    plan->new_abi->custom_migrate_hook(dst, src);
+                }
+
+                /* Control-Theoretic Bumpless Handover Hook */
+                if (plan->new_abi->handover_hook) {
+                    plan->new_abi->handover_hook(dst, src);
+                }
+
                 uint32_t iid = plan->migrations[m].inst_id;
                 host->insts[iid].mem         = dst;
                 host->insts[iid].size        = plan->new_abi->inst_size;
                 host->insts[iid].layout_hash = plan->new_abi->layout_hash;
                 host->inst_table[iid]        = dst;
+            }
+            host->metrics.last_copy_ns = bp_monotonic_ns() - copy_start_ns;
+        } else {
+            host->metrics.last_copy_ns = 0;
+            /* In 0-copy fast path, invoke handover_hook if provided */
+            if (plan->new_abi->handover_hook) {
+                for (uint32_t id = 0; id < BUMPLESS_MAX_INSTS; id++) {
+                    if (host->insts[id].mem && host->insts[id].owner_fn_id == fid) {
+                        plan->new_abi->handover_hook(host->insts[id].mem, host->insts[id].mem);
+                    }
+                }
             }
         }
 
@@ -720,6 +784,12 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
 
         host->verify_pending     = true;
         host->active_verify_plan = plan;
+
+        host->metrics.last_gap_ns = bp_monotonic_ns() - gap_start_ns;
+        host->metrics.total_swaps++;
+    } else {
+        host->metrics.last_gap_ns = bp_monotonic_ns() - gap_start_ns;
+        host->metrics.last_copy_ns = 0;
     }
 
     /* 2. Run MAIN cycle inside crash guard */
@@ -731,7 +801,9 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
 
     if (fault_sig == 0) {
         g_bp_in_cycle = 1;
+        uint64_t exec_start_ns = bp_monotonic_ns();
         BP_CALL(&host->ctx, main_fn_id, main_inst_id, now_ns);
+        host->metrics.last_exec_ns = bp_monotonic_ns() - exec_start_ns;
         g_bp_in_cycle = 0;
 
         /* New function survived its first cycle: commit permanently */
@@ -746,6 +818,7 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
         }
     } else {
         /* Fault caught! Roll back function pointer & instance slots immediately */
+        uint64_t rb_start_ns = bp_monotonic_ns();
         BpSwapPlan* bad = host->active_verify_plan;
         if (host->verify_pending && bad) {
             uint32_t fid = bad->fn_id;
@@ -774,10 +847,19 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
             atomic_store_explicit(&host->last_status, BP_ROLLED_BACK,
                                   memory_order_release);
 
+            host->metrics.last_rollback_ns = bp_monotonic_ns() - rb_start_ns;
+            host->metrics.total_rollbacks++;
+
             /* Re-execute cycle with rolled-back known-good function */
+            uint64_t exec_start_ns = bp_monotonic_ns();
             BP_CALL(&host->ctx, main_fn_id, main_inst_id, now_ns);
+            host->metrics.last_exec_ns = bp_monotonic_ns() - exec_start_ns;
         }
     }
+}
+
+static inline const BpPerfMetrics* bp_host_get_metrics(const BpHost* host) {
+    return &host->metrics;
 }
 
 static void bp_host_shutdown(BpHost* host) {
