@@ -286,7 +286,100 @@ $$T_{\text{gap}} = T_{\text{atomic\_swap}} + \sum_{m=1}^{M} \left( \sum_{k=1}^{K
 
 ---
 
-## 五、 竞品架构对比
+## 五、 非周期与航天高可靠系统的静默点（Quiescent Point）与代际安全机制
+
+### 1. 核心挑战：并发执行中替换的致命危害 (Mid-Execution Replacement Hazard)
+
+在典型 PLC 周期扫描系统中，热更天然是安全的：
+$$\text{输入采样} \longrightarrow \text{POU 逻辑执行} \longrightarrow \text{输出刷新} \longrightarrow \mathbf{周期静默间隙 (栈深度归零)}$$
+在周期间隙，没有任何 POU/FB 处于执行中，所有函数的调用栈帧已完全退出。
+
+**但在非周期性程序、事件驱动系统或多线程航天飞控软件中，若一个函数正在执行途中被强行热更，将面临三大灾难性破坏**：
+1. **数据竞态与更新丢失（Lost Update）**：
+   若线程 1 正在执行旧函数第 15 行写 `m->speed += 1`，后台管理线程在此时并发将 `old_mem` 拷贝至 `new_mem`；拷贝完成后线程 1 才落盘写入旧内存，导致新内存的 `speed` 彻底丢失此次累加！
+2. **释放后使用崩溃（Use-After-Free）**：
+   管理线程完成内存迁移后若释放旧实例内存，而线程 1 仍在旧代码中解引用旧内存成员，立即触发段错误（SIGSEGV）或硬件 HardFault！
+3. **调用栈帧与寄存器分裂（Frame & Register Mismatch）**：
+   若函数内部正在执行长时阻塞或循环，强行跳转新代码会导致已分配的寄存器变量、栈帧偏移与新结构体物理布局不匹配，程序执行走向未定义状态。
+
+---
+
+### 2. 非周期 / 航天嵌入式系统的 3 种工程解法
+
+为了使通用 C 程序或非周期航天软件安全应用 Bumpless，必须在软件架构中显式构造**静默点（Quiescent Point）**：
+
+#### 解法一：事务/指令边界检查点（Transaction Boundary Checkpoint —— 航天 cFS 模式）
+在航天飞控软件（如 NASA Core Flight System, cFS）、消息循环或无人机飞控系统中，任务通常由离散的遥测/遥控（TC/TM）报文或事件队列驱动：
+```c
+/* 航天事件循环主任务 */
+void flight_task_main(void) {
+    while (1) {
+        Message msg = queue_pop_blocking(); // 等待消息
+        
+        process_flight_message(&msg);        // 处理报文 (调用可能包含热更 FB)
+        
+        /* 
+         * === 事务静默检查点 (Quiescent Checkpoint) ===
+         * 此时报文已处理完毕，FB 函数已完全从调用栈退出！
+         * 在此安全提交热更新并执行纯 memcpy，绝对安全！
+         */
+        bp_host_quiescent_checkpoint(&g_host);
+    }
+}
+```
+
+#### 解法二：协作式活动排空计数器（Draining / Active Worker Tracking）
+针对多线程工作池（Worker Threads）或非周期异步任务，可引入零开销的原子代际计数器：
+```c
+/* 工作线程执行包装 */
+void worker_execute_motor(BpRuntimeCtx* ctx, uint32_t inst_id, uint64_t now_ns) {
+    // 1. 进入活跃区：原子增加正在执行计数
+    atomic_fetch_add_explicit(&g_motor_active_count, 1, memory_order_acquire);
+    
+    // 2. 执行业务
+    fb_motor_call(ctx, inst_id, now_ns);
+    
+    // 3. 离开活跃区：原子减少计数
+    atomic_fetch_sub_explicit(&g_motor_active_count, 1, memory_order_release);
+}
+
+/* 宿主管理线程在提交热更前执行排空等待 */
+void bp_safe_commit_aperiodic(BpHost* host, BpSwapPlan* plan) {
+    // 设置挂起请求标志，阻止新的调用进入
+    atomic_store(&g_swap_requested, true);
+    
+    // 自旋/等待直到当前正在执行该函数的线程彻底归零（排空完成）
+    while (atomic_load_explicit(&g_motor_active_count, memory_order_acquire) > 0) {
+        usleep(10); // 等待纳秒/微秒级排空
+    }
+    
+    // 静默达成：此时无任何线程在执行该 FB，安全执行 memcpy 并切换指针！
+    bp_commit_swap(host, plan);
+    atomic_store(&g_swap_requested, false);
+}
+```
+
+#### 解法三：代际延迟回收（Epoch-Based Reclamation / RCU 模式）
+对于纯逻辑热更（0 拷贝快速路径）：
+* 函数指针切换可在原子操作瞬间完成；
+* **关键约束**：被替换下的旧动态库（`.so`/`.dll`）**绝不能在当前周期立即卸载（`dlclose`）**！
+* 必须保持旧动态库常驻，直到系统经历一个宽限期（Grace Period，即确保在切换前进入函数的所有线程均已完全退出），方可安全调用 `dlclose`。
+
+---
+
+### 3. 严格不支持的边界场景（Hard Infeasible Scenarios）
+
+> [!CAUTION]
+> 如果通用 C 程序包含以下设计特征，**严禁使用任何结构体布局变更（Layout Migration）热更**：
+> 1. **不可退栈的长时阻塞调用**：如函数内部持有 `read(socket)`、`select()`、`pthread_cond_wait()` 阻塞在内核态；
+> 2. **内部死循环状态机**：如函数内部是 `while(1) { do_step(); usleep(); }` 永不退出；
+> 3. **深层不可中断的递归调用**。
+>
+> **工程整改方案**：必须先将上述代码解耦重构为**基于阶段的状态机（State Machine）**，将长阻塞点移出功能块，在每轮状态转移完成的间隙暴露静默点，方可纳管热更。
+
+---
+
+## 六、 竞品架构对比
 
 | 评估维度 | 传统二进制热补丁 (Patching) | 运行时自省反射库 (Dynamic) | Bumpless 离线探针/预编译 Plan 方案 |
 | :--- | :--- | :--- | :--- |
