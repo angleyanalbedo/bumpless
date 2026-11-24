@@ -208,12 +208,52 @@ $$T_{\text{gap}} = T_{\text{atomic\_swap}} + \sum_{m=1}^{M} \left( \sum_{k=1}^{K
    本方案专注于工控平坦数据块与 POD 状态迁移。若实例内部包含深层堆分配（如动态链表、树、外部句柄），直接浅拷贝无法完成深拷贝，必须配合专门的自定义序列化 Hook。
 3. **瞬态双倍内存占用**：
    在热更新提交的首个验证周期内，新旧两份实例内存需同时驻留，直至首周期安全存活后才回收旧内存。若控制器极端受限（RAM 空闲率低于单 FB 实例集大小），需进行分批次分槽位热更。
-4. **统一签名约束**：
-   所有可热更 POU/FB 必须遵循统一的转发表函数签名 `void (*BpPouFn)(BpRuntimeCtx* ctx, void* self, uint64_t now_ns)`。若需要增删全局参数，需扩展上下文结构体 `BpRuntimeCtx`。
+### 4. 统一签名与调用侵入约束
+* **原有约束**：所有可热更 POU/FB 必须遵循统一的转发表函数签名 `void (*BpPouFn)(BpRuntimeCtx* ctx, void* self, uint64_t now_ns)`，宿主必须通过 `BP_CALL` 或 `fn_table[fn_id]` 间接调用。
+* **解耦演进**：对于希望直接使用普通 C 调用语法（`motor_exec(&m)`）的存量系统，可通过后文详述的**透明桩（Wrapper Stubs）**或**动态链接符号表劫持（GOT/IAT Hooking）**进行无感抹平。
 
 ---
 
-## 四、 竞品架构对比
+## 四、 宿主调用模式演进：从显式转发表到无感直调 (Call Convention Evolution)
+
+针对**“宿主必须以函数表形式调用”**的侵入性问题，系统支持从“显式转发表”向“无感直调”平滑演进：
+
+### 演进路线对比
+
+| 方案 | 语法侵入性 | 运行期开销 | 平台移植性 | 状态迁移兼容性 | 典型应用场景 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **方案 A：显式转发表 (当前默认)** | 需要使用 `BP_CALL` | 极低（1次指针解引用） | 100% 标准 C11 | 完美配合实例槽池 | PLC 虚拟机、ST 编译器生成代码 |
+| **方案 B：透明内联桩 (Wrapper Stubs)** | **零侵入（原生 C 语法）** | 极低（可内联） | 100% 标准 C11 | 完美配合实例槽池 | 现代 C/C++ 业务层无感集成 |
+| **方案 C：GOT / IAT 符号重定向** | **零侵入（原生动态库调用）**| 零额外开销 | 依赖 ELF/PE 格式 | 需配合槽位重定位 | 模块化 Linux/Windows 宿主 |
+| **方案 D：指令跳板 (JMP Trampoline)** | **零侵入（直接机器码调用）**| 存在跳板开销 | 强依赖 CPU 指令集与 I-Cache | 极难处理布局变更 | Linux 内核 livepatch、只改逻辑的补丁 |
+
+#### 1. 方案 B 实现：透明内联包装桩（推荐工程实践）
+无需在业务代码中散落 `BP_CALL`，通过生成的头文件直接导出原生 C 函数签名：
+```c
+/* generated_motor_api.h */
+static inline void motor_exec(FbMotor* self, uint64_t now_ns) {
+    g_bp_ctx.fn_table[FN_FB_MOTOR](&g_bp_ctx, self, now_ns);
+}
+
+/* 宿主业务代码：完全原生 C，零心智负担 */
+void control_loop(void) {
+    motor_exec(p_motor1, now_ns);
+}
+```
+
+#### 2. 方案 C 实现：动态链接器重定向（GOT 劫持）
+在 Linux ELF 或 Windows PE 动态库架构中，模块间的函数调用本就通过全局偏移表（GOT, Global Offset Table）或导入地址表（IAT, Import Address Table）完成间接寻址：
+* 编译期：`MAIN` 声明 `extern void motor_exec(void* self);`，生成 `call *motor_exec@GOTPCREL`；
+* 热更周期间隙：宿主后台不仅挂载新 `.so`，且直接原子替换 `MAIN` 的 GOT 表项：
+  ```c
+  /* 周期间隙原子修改 GOT 表指针，纳秒级生效 */
+  *(void**)got_motor_exec_entry = new_module_motor_exec;
+  ```
+* **效果**：调用方代码**完全不需要函数表包装，按纯原生 C 动态库接口调用**。
+
+---
+
+## 五、 竞品架构对比
 
 | 评估维度 | 传统二进制热补丁 (Patching) | 运行时自省反射库 (Dynamic) | Bumpless 离线探针/预编译 Plan 方案 |
 | :--- | :--- | :--- | :--- |
