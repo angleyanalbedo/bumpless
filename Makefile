@@ -85,7 +85,20 @@ plot: bench
 qemu-test:
 	$(PYTHON) scripts/run_qemu_test.py
 
+example:
+	$(PYTHON) -c "import os; os.makedirs('$(BUILD_DIR)/examples', exist_ok=True)"
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/examples/hello_host$(TARGET_EXT) examples/minimal_hello/host.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -shared -fPIC -o $(BUILD_DIR)/examples/libmod_v1$(SO_EXT) examples/minimal_hello/mod_v1.c
+	$(CC) $(CFLAGS) -shared -fPIC -o $(BUILD_DIR)/examples/libmod_v2$(SO_EXT) examples/minimal_hello/mod_v2.c
+	$(RUN_WRAPPER) ./$(BUILD_DIR)/examples/hello_host$(TARGET_EXT)
+
+dwarf-test: $(BUILD_DIR)
+	$(CC) $(CFLAGS) -g -c src/modules/fn_motor_v1.c -o $(BUILD_DIR)/fn_motor_v1_dbg.o
+	$(CC) $(CFLAGS) -g -c src/modules/fn_motor_v3_layout.c -o $(BUILD_DIR)/fn_motor_v3_dbg.o
+	$(PYTHON) $(TOOLS_DIR)/bp_dwarf_probe.py $(BUILD_DIR)/fn_motor_v1_dbg.o --struct FbMotor_v1 --out $(BUILD_DIR)/dwarf_v1.json
+	$(PYTHON) $(TOOLS_DIR)/bp_dwarf_probe.py $(BUILD_DIR)/fn_motor_v3_dbg.o --struct FbMotor_v3 --out $(BUILD_DIR)/dwarf_v3.json
+
 clean:
 	$(RM)
 
-.PHONY: all run bench plot qemu-test clean
+.PHONY: all run bench plot qemu-test example dwarf-test clean

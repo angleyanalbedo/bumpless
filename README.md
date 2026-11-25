@@ -6,7 +6,7 @@
 [![Standard C11](https://img.shields.io/badge/C-C11-blue.svg)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20ARM32-lightgrey.svg)](#)
-[![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20ARM32%20QEMU-brightgreen.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/angleyanalbedo/bumpless/actions/workflows/ci.yml/badge.svg)](https://github.com/angleyanalbedo/bumpless/actions/workflows/ci.yml)
 
 ---
 
@@ -63,6 +63,8 @@ bumpless/
 ├── docs/                      # 架构设计、核心原理与技术权衡文档
 │   ├── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
 │   └── WHY_NOT_STACK_ALLOCATION.md # 深度技术规范：为什么热更状态绝不能选栈分配？
+├── examples/                  # 30 秒极简接入示例
+│   └── minimal_hello/         # 最小热更新宿主与模块示例
 ├── build/                     # 构建产物输出目录（可由 make clean 清理）
 ├── LICENSE                    # MIT 开源协议
 └── Makefile                   # 统一自动化构建系统

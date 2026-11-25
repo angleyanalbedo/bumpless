@@ -21,6 +21,9 @@ jobs:
       - name: Build & Run Host Demo (POSIX dlopen + sigaction)
         run: make clean && make run
 
+      - name: Run Minimal 30-Line Example & DWARF Probe Check
+        run: make example && make dwarf-test
+
       - name: Run 8 Benchmarks & Generate SVG Charts
         run: make plot
 
