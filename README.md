@@ -4,8 +4,9 @@
 > 专为工控实时系统、运动控制器与高实时嵌入式系统设计的无扰（Bumpless）在线热更新引擎。
 
 [![Standard C11](https://img.shields.io/badge/C-C11-blue.svg)](#)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](#)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](#)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20ARM32-lightgrey.svg)](#)
+[![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20ARM32%20QEMU-brightgreen.svg)](.github/workflows/ci.yml)
 
 ---
 
@@ -21,6 +22,8 @@
 * **实时周期严格确定**：在微秒级的实时周期间隙仅执行预合并的纯 `memcpy`，无动态内存分配，无哈希检索，执行耗时严格可预测。
 * **C++ 虚表与指针安全隔离**：明确跳过 `vptr`（虚函数表指针）和内部自引用指针，彻底杜绝虚表悬挂与野指针崩溃。
 * **首周期故障秒级回滚**：基于异常守护（VEH / sigaction）监控新版本首周期的执行状态，遇非法访问自动原子回退。
+* **控制论无扰平滑过渡 (`bp_handover.h`)**：提供 PID 积分跟踪反算、斜坡限幅器与多周期 S 型曲线混合，杜绝切换瞬间执行机构物理冲击。
+* **SIL-3 内存安全与多核屏障**：内置 CopyPlan IEEE 802.3 CRC32 校验、实例槽位头尾 Canary 哨兵及多核无锁代际静默屏障。
 
 ---
 
@@ -28,16 +31,19 @@
 
 ```text
 bumpless/
+├── .github/workflows/         # GitHub Actions 三平台自动化 CI (Linux / Windows / ARM32 QEMU)
+│   └── ci.yml
 ├── include/                   # 公共 API 与核心头文件
 │   ├── bumpless.h             # 跨平台核心热更引擎（单头文件库设计）
+│   ├── bp_handover.h          # 控制论无扰平滑过渡算法库 (积分跟踪 / 斜坡限幅 / S曲线)
 │   ├── common_ids.h           # 统一函数槽与实例槽 ID 常量定义
-│   ├── bp_module.h            # 开发者零样板宏助手 (BP_EXPORT_MODULE)
+│   ├── bp_module.h            # 开发者零样板宏助手 (BP_EXPORT_MODULE / BP_EXPORT_MODULE_EX)
 │   └── bp_stubs.h             # 方案1自动生成的原生 C 语法包装桩
 ├── src/                       # 源代码实现
 │   ├── host/
 │   │   └── host_main.c        # 运行时宿主（调度 RT 周期、加载模块与 Plan）
 │   ├── benchmark/
-│   │   └── bench_main.c       # 5 项定量实验基准测试套件与控制论过渡验证
+│   │   └── bench_main.c       # 8 项定量实验、SIL-3 安全验证与多核屏障测试套件
 │   └── modules/               # 可热更功能块（POU / FB）模块源码
 │       ├── fn_main.c          # 顶层 MAIN 主控程序
 │       ├── fn_motor_v1.c      # 电机控制 FB V1（基础版本）
@@ -51,12 +57,14 @@ bumpless/
 │   ├── bp_probe.h             # 目标 ABI 同构宏与元数据结构体
 │   ├── probe_motor.c          # 目标同构探针源码（用目标编译器编译）
 │   ├── bp_dwarf_probe.py      # 离线 DWARF 零侵入布局提取器
-│   ├── bp_plan_compiler.py    # 离线 CopyPlan 编译器（区间合并与安全过滤）
-│   └── bp_stub_gen.py         # 方案1透明包装桩生成器与模块脚手架工具
+│   ├── bp_plan_compiler.py    # 离线 CopyPlan 编译器（区间合并、安全过滤与 CRC32）
+│   ├── bp_stub_gen.py         # 方案1透明包装桩生成器与模块脚手架工具
+│   └── plot_benchmarks.py     # 零依赖 SVG 矢量图与 HTML 交互式看板生成器
 ├── docs/                      # 架构设计、核心原理与技术权衡文档
 │   ├── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
 │   └── WHY_NOT_STACK_ALLOCATION.md # 深度技术规范：为什么热更状态绝不能选栈分配？
 ├── build/                     # 构建产物输出目录（可由 make clean 清理）
+├── LICENSE                    # MIT 开源协议
 └── Makefile                   # 统一自动化构建系统
 ```
 
@@ -74,13 +82,16 @@ bumpless/
 # 1. 一键编译所有模块、提取离线 ABI 布局、生成 CopyPlan 并启动宿主验证
 make run
 
-# 2. 运行工业级 5 项定量基准测试套件（时延抖动、消融加速比、水平扩展、零膨胀、故障回滚）
+# 2. 运行 8 项定量基准与安全测试套件并导出 7 份 CSV 数据
 make bench
 
-# 3. 运行跨平台 QEMU ARM32 目标 ABI 仿真测试流水线
+# 3. 运行测试并自动生成 6 张 SVG 矢量图与 HTML 交互式仪表盘 (build/benchmark_results/charts/dashboard.html)
+make plot
+
+# 4. 运行跨平台 QEMU ARM32 目标 ABI 测试流水线
 make qemu-test
 
-# 4. 清理所有编译生成目录与二进制文件
+# 5. 清理所有编译生成目录与二进制文件
 make clean
 ```
 

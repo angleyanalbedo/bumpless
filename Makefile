@@ -1,8 +1,9 @@
-CC         := gcc
-INC_DIR    := include
-SRC_DIR    := src
-TOOLS_DIR  := tools
-BUILD_DIR  := build
+CC          := gcc
+RUN_WRAPPER :=
+INC_DIR     := include
+SRC_DIR     := src
+TOOLS_DIR   := tools
+BUILD_DIR   := build
 
 CFLAGS     := -std=c11 -Wall -Wextra -O2 -I$(INC_DIR) -I$(TOOLS_DIR)
 
@@ -16,7 +17,8 @@ ifeq ($(OS),Windows_NT)
 else
     TARGET_EXT :=
     SO_EXT     := .so
-    LDFLAGS    := -ldl
+    CFLAGS     += -D_POSIX_C_SOURCE=200809L
+    LDFLAGS    := -ldl -lpthread
     PYTHON     := python3
     MKDIR      := mkdir -p $(BUILD_DIR)
     RM         := rm -rf $(BUILD_DIR)
@@ -54,7 +56,7 @@ $(PROBE): $(TOOLS_DIR)/probe_motor.c $(TOOLS_DIR)/bp_probe.h $(INC_DIR)/bumpless
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/layout_v1.json $(BUILD_DIR)/layout_v3.json: $(PROBE)
-	./$(PROBE) $(BUILD_DIR)
+	$(RUN_WRAPPER) ./$(PROBE) $(BUILD_DIR)
 
 $(PLAN_1_3): $(BUILD_DIR)/layout_v1.json $(BUILD_DIR)/layout_v3.json $(TOOLS_DIR)/bp_plan_compiler.py
 	$(PYTHON) $(TOOLS_DIR)/bp_plan_compiler.py \
@@ -73,10 +75,10 @@ $(PLAN_3_1): $(BUILD_DIR)/layout_v1.json $(BUILD_DIR)/layout_v3.json $(TOOLS_DIR
 		--out-c $(BUILD_DIR)/copy_plan_v3_to_v1.h
 
 run: all
-	./$(HOST)
+	$(RUN_WRAPPER) ./$(HOST)
 
 bench: all $(BENCH)
-	./$(BENCH)
+	$(RUN_WRAPPER) ./$(BENCH)
 
 plot: bench
 	$(PYTHON) $(TOOLS_DIR)/plot_benchmarks.py

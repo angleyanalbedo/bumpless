@@ -1,0 +1,80 @@
+name: Bumpless Cross-Platform & ARM32 QEMU CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64 (POSIX + Benchmarks + SVG)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make python3
+
+      - name: Build & Run Host Demo (POSIX dlopen + sigaction)
+        run: make clean && make run
+
+      - name: Run 8 Benchmarks & Generate SVG Charts
+        run: make plot
+
+      - name: Upload Benchmark CSVs & SVG Dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-linux-x86_64
+          path: build/benchmark_results/
+
+  arm32-qemu:
+    name: ARM32 Cross-Compile & QEMU Emulation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM32 cross-toolchain & QEMU user-mode emulator
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user make python3
+
+      - name: Run ARM32 Probe & CopyPlan Pipeline (QEMU)
+        run: bash scripts/run_qemu_test.sh
+
+      - name: Cross-Compile & Run Full Bumpless Host + 8 Benchmarks on ARM32 QEMU
+        run: |
+          make clean
+          make CC=arm-linux-gnueabihf-gcc RUN_WRAPPER="qemu-arm -L /usr/arm-linux-gnueabihf" run bench
+
+      - name: Upload ARM32 Plans & Benchmark Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm32-qemu-artifacts
+          path: |
+            build/arm32/
+            build/benchmark_results/
+
+  windows-x86_64:
+    name: Windows x86_64 (MinGW + Win32 VEH)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+
+      - name: Build, Run & Plot on Windows
+        shell: msys2 {0}
+        run: |
+          make clean
+          make run
+          make plot
