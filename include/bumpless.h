@@ -135,7 +135,7 @@ typedef struct {
     uint32_t dst_inst_size;
     uint32_t copy_op_count;
     uint32_t total_copy_bytes;
-    uint32_t reserved;
+    uint32_t plan_crc32;        /* IEEE 802.3 CRC32 over BpCopyOp array (0 = unchecked) */
 } BpPlanFileHeader;
 #pragma pack(pop)
 
@@ -187,6 +187,8 @@ typedef enum {
     BP_ERR_ALLOC,
     BP_ERR_PLAN_MISMATCH,
     BP_ERR_PLAN_IO,
+    BP_ERR_CRC,
+    BP_ERR_CANARY,
     BP_ROLLED_BACK
 } BpStatus;
 
@@ -258,9 +260,16 @@ typedef struct {
     const BpModuleABI* abi;
 } BpFuncSlot;
 
+#define BP_CANARY_HEAD_MAGIC 0xCAFEBABE12345678ULL
+#define BP_CANARY_TAIL_MAGIC 0xDEADBEEF87654321ULL
+#define BP_CANARY_HEAD_PAD   16u
+#define BP_CANARY_TAIL_SIZE  8u
+#define BUMPLESS_MAX_CORES   16u
+
 typedef struct {
     uint32_t           owner_fn_id;
     void*              mem;
+    void*              alloc_base;  /* Non-NULL if canary-guarded allocation */
     uint32_t           size;
     uint64_t           layout_hash;
 } BpInstSlot;
@@ -268,7 +277,9 @@ typedef struct {
 typedef struct {
     uint32_t inst_id;
     void*    new_mem;
+    void*    new_alloc_base;
     void*    old_mem;
+    void*    old_alloc_base;
 } BpInstMigration;
 
 typedef struct {
@@ -312,6 +323,12 @@ typedef struct {
 
     /* Runtime telemetry & performance metrics */
     BpPerfMetrics      metrics;
+
+    /* Multi-Core Lock-Free Epoch Quiescent Barrier */
+    _Atomic(uint64_t)  mc_global_epoch;
+    _Atomic(uint64_t)  mc_target_swap_epoch;
+    _Atomic(bool)      mc_core_active[BUMPLESS_MAX_CORES];
+    _Atomic(uint64_t)  mc_core_epoch[BUMPLESS_MAX_CORES];
 } BpHost;
 
 /* Thread-local jump buffer for RT crash guard */
@@ -352,6 +369,52 @@ static void bp_rt_fault_handler(int sig) {
 }
 #endif
 
+/* IEEE 802.3 CRC32 for SIL-3 CopyPlan & memory integrity verification */
+static inline uint32_t bp_crc32(const void* data, size_t len) {
+    const uint8_t* p = (const uint8_t*)data;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; b++) {
+            uint32_t mask = (uint32_t)(-(int32_t)(crc & 1U));
+            crc = (crc >> 1) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+}
+
+/* SIL-3 Canary Guard allocator: [16B head pad (magic + size)] + [payload] + [8B tail magic] */
+static inline void* bp_alloc_guarded(uint32_t payload_size, void** out_base) {
+    uint32_t actual_size = payload_size > 0 ? payload_size : 1;
+    size_t total = BP_CANARY_HEAD_PAD + (size_t)actual_size + BP_CANARY_TAIL_SIZE;
+    uint8_t* base = (uint8_t*)calloc(1, total);
+    if (!base) {
+        if (out_base) *out_base = NULL;
+        return NULL;
+    }
+    uint64_t head_magic = BP_CANARY_HEAD_MAGIC;
+    uint64_t size_tag   = (uint64_t)payload_size;
+    uint64_t tail_magic = BP_CANARY_TAIL_MAGIC;
+    memcpy(base, &head_magic, sizeof(head_magic));
+    memcpy(base + 8, &size_tag, sizeof(size_tag));
+    memcpy(base + BP_CANARY_HEAD_PAD + actual_size, &tail_magic, sizeof(tail_magic));
+    if (out_base) *out_base = base;
+    return base + BP_CANARY_HEAD_PAD;
+}
+
+static inline bool bp_check_guarded_ptr(const void* payload, uint32_t expected_size) {
+    if (!payload) return false;
+    const uint8_t* base = (const uint8_t*)payload - BP_CANARY_HEAD_PAD;
+    uint64_t head_magic = 0, size_tag = 0, tail_magic = 0;
+    memcpy(&head_magic, base, sizeof(head_magic));
+    memcpy(&size_tag, base + 8, sizeof(size_tag));
+    uint32_t actual_size = expected_size > 0 ? expected_size : 1;
+    memcpy(&tail_magic, base + BP_CANARY_HEAD_PAD + actual_size, sizeof(tail_magic));
+    return (head_magic == BP_CANARY_HEAD_MAGIC) &&
+           (size_tag == (uint64_t)expected_size) &&
+           (tail_magic == BP_CANARY_TAIL_MAGIC);
+}
+
 static void bp_host_init(BpHost* host, size_t max_copy_bytes_per_swap) {
     memset(host, 0, sizeof(*host));
     host->ctx.io         = &host->io;
@@ -362,6 +425,12 @@ static void bp_host_init(BpHost* host, size_t max_copy_bytes_per_swap) {
     atomic_init(&host->pending_plan, NULL);
     atomic_init(&host->retired_handle, NULL);
     atomic_init(&host->last_status, BP_OK);
+    atomic_init(&host->mc_global_epoch, 1);
+    atomic_init(&host->mc_target_swap_epoch, 0);
+    for (uint32_t c = 0; c < BUMPLESS_MAX_CORES; c++) {
+        atomic_init(&host->mc_core_active[c], false);
+        atomic_init(&host->mc_core_epoch[c], 0);
+    }
 
 #if defined(_WIN32) || defined(__CYGWIN__)
     if (!g_bp_veh_handle) {
@@ -386,12 +455,14 @@ static BpStatus bp_host_bind_instance(BpHost* host, uint32_t inst_id, uint32_t f
     const BpModuleABI* abi = host->funcs[fn_id].abi;
     if (!abi) return BP_ERR_ABI;
 
-    void* mem = calloc(1, abi->inst_size > 0 ? abi->inst_size : 1);
+    void* alloc_base = NULL;
+    void* mem = bp_alloc_guarded(abi->inst_size, &alloc_base);
     if (!mem) return BP_ERR_ALLOC;
     if (abi->init_inst) abi->init_inst(mem);
 
     host->insts[inst_id].owner_fn_id = fn_id;
     host->insts[inst_id].mem         = mem;
+    host->insts[inst_id].alloc_base  = alloc_base;
     host->insts[inst_id].size        = abi->inst_size;
     host->insts[inst_id].layout_hash = abi->layout_hash;
     host->inst_table[inst_id]        = mem;
@@ -443,6 +514,16 @@ static BpStatus bp_read_plan_file(const char* filepath,
             free(ops);
             fclose(fp);
             return BP_ERR_PLAN_IO;
+        }
+        if (hdr.plan_crc32 != 0) {
+            uint32_t actual_crc = bp_crc32(ops, hdr.copy_op_count * sizeof(BpCopyOp));
+            if (actual_crc != hdr.plan_crc32) {
+                fprintf(stderr, "[bumpless] SIL-3 CRC32 mismatch in '%s': file=0x%08X calc=0x%08X\n",
+                        filepath, hdr.plan_crc32, actual_crc);
+                free(ops);
+                fclose(fp);
+                return BP_ERR_CRC;
+            }
         }
     }
 
@@ -536,10 +617,12 @@ static void bp_free_plan(BpSwapPlan* plan, bool free_new_mems, bool free_old_mem
     if (!plan) return;
     for (size_t i = 0; i < plan->migration_count; i++) {
         if (free_new_mems && plan->migrations[i].new_mem) {
-            free(plan->migrations[i].new_mem);
+            free(plan->migrations[i].new_alloc_base ? plan->migrations[i].new_alloc_base
+                                                    : plan->migrations[i].new_mem);
         }
         if (free_old_mems && plan->migrations[i].old_mem) {
-            free(plan->migrations[i].old_mem);
+            free(plan->migrations[i].old_alloc_base ? plan->migrations[i].old_alloc_base
+                                                    : plan->migrations[i].old_mem);
         }
     }
     free(plan->migrations);
@@ -679,7 +762,8 @@ static BpStatus bp_host_stage_func_ex(BpHost* host, const char* so_path, const c
         size_t idx = 0;
         for (uint32_t id = 0; id < BUMPLESS_MAX_INSTS; id++) {
             if (host->insts[id].mem && host->insts[id].owner_fn_id == fn_id) {
-                void* new_mem = calloc(1, new_abi->inst_size > 0 ? new_abi->inst_size : 1);
+                void* new_alloc_base = NULL;
+                void* new_mem = bp_alloc_guarded(new_abi->inst_size, &new_alloc_base);
                 if (!new_mem) {
                     bp_free_plan(plan, true, false);
                     bp_dlclose(handle);
@@ -688,9 +772,11 @@ static BpStatus bp_host_stage_func_ex(BpHost* host, const char* so_path, const c
                 /* Run constructor / initializer on fresh instance slot */
                 if (new_abi->init_inst) new_abi->init_inst(new_mem);
                 plan->migrations[idx++] = (BpInstMigration){
-                    .inst_id = id,
-                    .new_mem = new_mem,
-                    .old_mem = host->insts[id].mem
+                    .inst_id        = id,
+                    .new_mem        = new_mem,
+                    .new_alloc_base = new_alloc_base,
+                    .old_mem        = host->insts[id].mem,
+                    .old_alloc_base = host->insts[id].alloc_base
                 };
             }
         }
@@ -761,6 +847,7 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
 
                 uint32_t iid = plan->migrations[m].inst_id;
                 host->insts[iid].mem         = dst;
+                host->insts[iid].alloc_base  = plan->migrations[m].new_alloc_base;
                 host->insts[iid].size        = plan->new_abi->inst_size;
                 host->insts[iid].layout_hash = plan->new_abi->layout_hash;
                 host->inst_table[iid]        = dst;
@@ -830,6 +917,7 @@ static void bp_host_rt_cycle(BpHost* host, uint32_t main_fn_id,
                 for (size_t m = 0; m < bad->migration_count; m++) {
                     uint32_t iid = bad->migrations[m].inst_id;
                     host->insts[iid].mem         = bad->migrations[m].old_mem;
+                    host->insts[iid].alloc_base  = bad->migrations[m].old_alloc_base;
                     host->insts[iid].size        = host->prev_func_slot.abi->inst_size;
                     host->insts[iid].layout_hash = host->prev_func_slot.abi->layout_hash;
                     host->inst_table[iid]        = bad->migrations[m].old_mem;
@@ -862,12 +950,77 @@ static inline const BpPerfMetrics* bp_host_get_metrics(const BpHost* host) {
     return &host->metrics;
 }
 
+/*
+ * SIL-3 Canary Guard Verification:
+ * Checks head & tail magic words on all canary-guarded instance slots.
+ * Returns BP_ERR_CANARY if any out-of-bounds write corrupted a slot boundary.
+ */
+static inline BpStatus bp_host_check_canaries(const BpHost* host) {
+    for (uint32_t i = 0; i < BUMPLESS_MAX_INSTS; i++) {
+        if (host->insts[i].mem && host->insts[i].alloc_base) {
+            if (!bp_check_guarded_ptr(host->insts[i].mem, host->insts[i].size)) {
+                fprintf(stderr, "[bumpless] SIL-3 CANARY CORRUPTION detected on inst_id=%u!\n", i);
+                return BP_ERR_CANARY;
+            }
+        }
+    }
+    return BP_OK;
+}
+
+/*
+ * Multi-Core Lock-Free Epoch Quiescent Barrier (多核无锁代际静默屏障):
+ * Allows multiple RT worker cores running at different frequencies to safely
+ * synchronize without mutexes or priority inversion.
+ */
+static inline BpStatus bp_mc_register_core(BpHost* host, uint32_t core_id) {
+    if (core_id >= BUMPLESS_MAX_CORES) return BP_ERR_RANGE;
+    uint64_t cur = atomic_load_explicit(&host->mc_global_epoch, memory_order_acquire);
+    atomic_store_explicit(&host->mc_core_epoch[core_id], cur, memory_order_release);
+    atomic_store_explicit(&host->mc_core_active[core_id], true, memory_order_release);
+    return BP_OK;
+}
+
+static inline void bp_mc_unregister_core(BpHost* host, uint32_t core_id) {
+    if (core_id < BUMPLESS_MAX_CORES) {
+        atomic_store_explicit(&host->mc_core_active[core_id], false, memory_order_release);
+    }
+}
+
+static inline void bp_mc_quiescent_point(BpHost* host, uint32_t core_id) {
+    if (core_id < BUMPLESS_MAX_CORES) {
+        uint64_t cur = atomic_load_explicit(&host->mc_global_epoch, memory_order_acquire);
+        atomic_store_explicit(&host->mc_core_epoch[core_id], cur, memory_order_release);
+    }
+}
+
+static inline uint64_t bp_mc_begin_swap_epoch(BpHost* host) {
+    uint64_t next = atomic_fetch_add_explicit(&host->mc_global_epoch, 1, memory_order_acq_rel) + 1;
+    atomic_store_explicit(&host->mc_target_swap_epoch, next, memory_order_release);
+    return next;
+}
+
+static inline bool bp_mc_all_cores_quiescent(const BpHost* host) {
+    uint64_t target = atomic_load_explicit(&((BpHost*)host)->mc_target_swap_epoch, memory_order_acquire);
+    for (uint32_t c = 0; c < BUMPLESS_MAX_CORES; c++) {
+        if (atomic_load_explicit(&((BpHost*)host)->mc_core_active[c], memory_order_acquire)) {
+            uint64_t core_ep = atomic_load_explicit(&((BpHost*)host)->mc_core_epoch[c], memory_order_acquire);
+            if (core_ep < target) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static void bp_host_shutdown(BpHost* host) {
     void* retired = atomic_exchange(&host->retired_handle, NULL);
     if (retired) bp_dlclose(retired);
     for (uint32_t i = 0; i < BUMPLESS_MAX_INSTS; i++) {
-        free(host->insts[i].mem);
-        host->insts[i].mem = NULL;
+        if (host->insts[i].mem) {
+            free(host->insts[i].alloc_base ? host->insts[i].alloc_base : host->insts[i].mem);
+            host->insts[i].mem = NULL;
+            host->insts[i].alloc_base = NULL;
+        }
     }
     for (uint32_t i = 0; i < BUMPLESS_MAX_FUNCS; i++) {
         if (host->funcs[i].dl_handle) {

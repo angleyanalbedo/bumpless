@@ -18,6 +18,7 @@ Key Responsibilities:
 import sys
 import json
 import struct
+import zlib
 import argparse
 from typing import List, Dict, Any, Tuple
 
@@ -128,6 +129,9 @@ def export_binary_plan(plan_file: str, target_fn_id: int, src_hash: int, dst_has
     # uint32 copy_op_count
     # uint32 total_copy_bytes
     # uint32 reserved
+    payload = b"".join(struct.pack("<III", op.dst_off, op.src_off, op.len) for op in ops)
+    plan_crc32 = zlib.crc32(payload) & 0xFFFFFFFF if payload else 0
+
     hdr = struct.pack(
         "<QIIQQIIIII",
         BP_PLAN_MAGIC,
@@ -139,14 +143,12 @@ def export_binary_plan(plan_file: str, target_fn_id: int, src_hash: int, dst_has
         dst_size,
         len(ops),
         total_bytes,
-        0
+        plan_crc32
     )
     with open(plan_file, "wb") as f:
         f.write(hdr)
-        for op in ops:
-            # Each op: dst_off (u32), src_off (u32), len (u32)
-            f.write(struct.pack("<III", op.dst_off, op.src_off, op.len))
-    print(f"  [EMIT] Serialized binary plan to '{plan_file}' ({len(hdr) + len(ops) * 12} bytes)")
+        f.write(payload)
+    print(f"  [EMIT] Serialized binary plan to '{plan_file}' ({len(hdr) + len(payload)} bytes, CRC32=0x{plan_crc32:08X})")
 
 def export_c_header(c_file: str, plan_var_name: str, target_fn_id: int,
                      src_hash: int, dst_hash: int, src_size: int, dst_size: int,

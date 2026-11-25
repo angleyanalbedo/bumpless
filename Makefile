@@ -78,10 +78,13 @@ run: all
 bench: all $(BENCH)
 	./$(BENCH)
 
+plot: bench
+	$(PYTHON) $(TOOLS_DIR)/plot_benchmarks.py
+
 qemu-test:
 	$(PYTHON) scripts/run_qemu_test.py
 
 clean:
 	$(RM)
 
-.PHONY: all run bench qemu-test clean
+.PHONY: all run bench plot qemu-test clean
