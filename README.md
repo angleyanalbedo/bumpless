@@ -63,8 +63,9 @@ bumpless/
 ├── docs/                      # 架构设计、核心原理与技术权衡文档
 │   ├── ARCHITECTURE.md        # 详细原理分析、设计公式、优缺点与边界条件
 │   └── WHY_NOT_STACK_ALLOCATION.md # 深度技术规范：为什么热更状态绝不能选栈分配？
-├── examples/                  # 30 秒极简接入示例
-│   └── minimal_hello/         # 最小热更新宿主与模块示例
+├── examples/                  # 上手与集成示例
+│   ├── minimal_hello/         # 30 行最小热更新宿主与模块示例 (make example)
+│   └── st2cpp_integration/    # ST2CPP (runtime-flat) C++11 周期调度与 TCI 集成示例 (make st2cpp-example)
 ├── build/                     # 构建产物输出目录（可由 make clean 清理）
 ├── LICENSE                    # MIT 开源协议
 └── Makefile                   # 统一自动化构建系统

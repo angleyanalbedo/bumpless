@@ -27,6 +27,25 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef BUMPLESS_HOST_IMPL
+  #ifdef __cplusplus
+    #include <atomic>
+    #define BP_ATOMIC(T) std::atomic<T>
+    using std::memory_order_acquire;
+    using std::memory_order_release;
+    using std::memory_order_acq_rel;
+    using std::atomic_init;
+    using std::atomic_load_explicit;
+    using std::atomic_store_explicit;
+    using std::atomic_exchange_explicit;
+    using std::atomic_fetch_add_explicit;
+    using std::atomic_exchange;
+  #else
+    #include <stdatomic.h>
+    #define BP_ATOMIC(T) _Atomic(T)
+  #endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -194,7 +213,6 @@ typedef enum {
 
 #ifdef BUMPLESS_HOST_IMPL
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,18 +335,18 @@ typedef struct {
     BpFuncSlot         prev_func_slot;
 
     /* Lock-free handoff between non-RT management thread and RT scan thread. */
-    _Atomic(BpSwapPlan*) pending_plan;
-    _Atomic(void*)       retired_handle;
-    _Atomic(int)         last_status;
+    BP_ATOMIC(BpSwapPlan*) pending_plan;
+    BP_ATOMIC(void*)       retired_handle;
+    BP_ATOMIC(int)         last_status;
 
     /* Runtime telemetry & performance metrics */
     BpPerfMetrics      metrics;
 
     /* Multi-Core Lock-Free Epoch Quiescent Barrier */
-    _Atomic(uint64_t)  mc_global_epoch;
-    _Atomic(uint64_t)  mc_target_swap_epoch;
-    _Atomic(bool)      mc_core_active[BUMPLESS_MAX_CORES];
-    _Atomic(uint64_t)  mc_core_epoch[BUMPLESS_MAX_CORES];
+    BP_ATOMIC(uint64_t)  mc_global_epoch;
+    BP_ATOMIC(uint64_t)  mc_target_swap_epoch;
+    BP_ATOMIC(bool)      mc_core_active[BUMPLESS_MAX_CORES];
+    BP_ATOMIC(uint64_t)  mc_core_epoch[BUMPLESS_MAX_CORES];
 } BpHost;
 
 /* Thread-local jump buffer for RT crash guard */
@@ -416,7 +434,8 @@ static inline bool bp_check_guarded_ptr(const void* payload, uint32_t expected_s
 }
 
 static void bp_host_init(BpHost* host, size_t max_copy_bytes_per_swap) {
-    memset(host, 0, sizeof(*host));
+    memset((void*)&host->io, 0, offsetof(BpHost, pending_plan));
+    memset((void*)&host->metrics, 0, sizeof(host->metrics));
     host->ctx.io         = &host->io;
     host->ctx.fn_table   = host->fn_table;
     host->ctx.inst_table = host->inst_table;

@@ -92,6 +92,11 @@ example:
 	$(CC) $(CFLAGS) -shared -fPIC -o $(BUILD_DIR)/examples/libmod_v2$(SO_EXT) examples/minimal_hello/mod_v2.c
 	$(RUN_WRAPPER) ./$(BUILD_DIR)/examples/hello_host$(TARGET_EXT)
 
+st2cpp-example: all
+	$(PYTHON) -c "import os; os.makedirs('$(BUILD_DIR)/examples', exist_ok=True)"
+	g++ -std=c++11 -Wall -Wextra -O2 -I$(INC_DIR) -o $(BUILD_DIR)/examples/st2cpp_demo$(TARGET_EXT) examples/st2cpp_integration/main.cpp $(LDFLAGS)
+	$(RUN_WRAPPER) ./$(BUILD_DIR)/examples/st2cpp_demo$(TARGET_EXT)
+
 dwarf-test: $(BUILD_DIR)
 	$(CC) $(CFLAGS) -g -c src/modules/fn_motor_v1.c -o $(BUILD_DIR)/fn_motor_v1_dbg.o
 	$(CC) $(CFLAGS) -g -c src/modules/fn_motor_v3_layout.c -o $(BUILD_DIR)/fn_motor_v3_dbg.o
@@ -101,4 +106,4 @@ dwarf-test: $(BUILD_DIR)
 clean:
 	$(RM)
 
-.PHONY: all run bench plot qemu-test example dwarf-test clean
+.PHONY: all run bench plot qemu-test example st2cpp-example dwarf-test clean

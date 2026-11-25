@@ -21,8 +21,8 @@ jobs:
       - name: Build & Run Host Demo (POSIX dlopen + sigaction)
         run: make clean && make run
 
-      - name: Run Minimal 30-Line Example & DWARF Probe Check
-        run: make example && make dwarf-test
+      - name: Run Minimal 30-Line Example, ST2CPP C++11 Adapter & DWARF Probe Check
+        run: make example && make st2cpp-example && make dwarf-test
 
       - name: Run 8 Benchmarks & Generate SVG Charts
         run: make plot
