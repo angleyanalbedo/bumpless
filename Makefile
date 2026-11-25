@@ -12,17 +12,16 @@ ifeq ($(OS),Windows_NT)
     SO_EXT     := .dll
     LDFLAGS    :=
     PYTHON     := python
-    MKDIR      := if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
-    RM         := cmd /C if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
 else
     TARGET_EXT :=
     SO_EXT     := .so
     CFLAGS     += -D_POSIX_C_SOURCE=200809L
     LDFLAGS    := -ldl -lpthread
     PYTHON     := python3
-    MKDIR      := mkdir -p $(BUILD_DIR)
-    RM         := rm -rf $(BUILD_DIR)
 endif
+
+MKDIR      := $(PYTHON) -c "import os; os.makedirs('$(BUILD_DIR)', exist_ok=True)"
+RM         := $(PYTHON) -c "import shutil; shutil.rmtree('$(BUILD_DIR)', ignore_errors=True)"
 
 HOST   := $(BUILD_DIR)/bumpless_host$(TARGET_EXT)
 BENCH  := $(BUILD_DIR)/bumpless_bench$(TARGET_EXT)
